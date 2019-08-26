@@ -38,7 +38,7 @@ from ansible.executor.process.worker import WorkerProcess
 from ansible.plugins import loader as plugin_loader
 
 # imports for ClassicalWorkerProcess
-import queue
+# import queue
 
 import traceback
 import multiprocessing
@@ -79,6 +79,16 @@ display = Display()
 class StrategyModule(StrategyBase):
 
     noop_task = None
+
+    def __init__(self, tqm):
+        display.display('entering __init__()')
+        super(StrategyModule, self).__init__(tqm)
+        self._main_q = None
+
+    def cleanup(self):
+        display.display('entering cleanup()')
+        self._main_q.close()
+        return super(StrategyModule, self).cleanup()
 
     def _replace_with_noop(self, target):
         if self.noop_task is None:
@@ -231,6 +241,10 @@ class StrategyModule(StrategyBase):
         moving on to the next task
         '''
 
+        # create main queue
+        if not self._main_q:
+            self._main_q = multiprocessing.Queue()
+
         # iterate over each task, while there is one left to run
         result = self._tqm.RUN_OK
         work_to_do = True
@@ -349,8 +363,17 @@ class StrategyModule(StrategyBase):
                 if skip_rest:
                     continue
 
+                # TODO: join worker processes
                 display.debug("done queuing things up, now waiting for results queue to drain")
                 if self._pending_results > 0:
+                    self._start_workers()
+                    try:
+                        for worker_prc in self._tqm._workers:
+                            worker_prc.join()
+                    except KeyboardInterrupt:
+                        for worker_prc in self._tqm._workers:
+                            worker_prc.terminate()
+                            worker_prc.join()
                     # FIXME: 很长?
                     results += self._wait_on_pending_results(iterator)
 
@@ -484,13 +507,31 @@ class StrategyModule(StrategyBase):
 
         # run the base class run() method, which executes the cleanup function
         # and runs any outstanding handlers which have been triggered
-
         return super(StrategyModule, self).run(iterator, play_context, result)
+
+    # TODO:
+    def _start_workers(self):
+        display.display('entering _start_workers()')
+        self._cur_worker = 0
+        for worker_prc in self._tqm._workers:
+            if worker_prc is None or not worker_prc.is_alive():
+                # start worker process
+                worker_prc = ClassicalWorkerProcess(self._main_q, self._final_q, task_vars=None, host=None, task=None,
+                                                    play_context=None, loader=self._loader, variable_manager=self._variable_manager,
+                                                    shared_loader_obj=plugin_loader)
+                self._tqm._workers[self._cur_worker] = worker_prc
+                # self._tqm.send_callback('v2_runner_on_start', host, task)
+                self._tqm.send_callback('v2_runner_on_start', None, None)
+                worker_prc.start()
+                display.debug("worker is %d (out of %d available)" % (self._cur_worker + 1, len(self._tqm._workers)))
+            self._cur_worker += 1
+
+            # put sentinel for stop worker
+            self._main_q.put(None)
 
     def _queue_task(self, host, task, task_vars, play_context):
         ''' handles queueing the task up to be sent to a worker '''
 
-        display.display("entering _queue_task() for %s/%s" % (host.name, task.action))
         display.debug("entering _queue_task() for %s/%s" % (host.name, task.action))
 
         # Add a write lock for tasks.
@@ -509,46 +550,16 @@ class StrategyModule(StrategyBase):
             action_write_locks.action_write_locks[task.action] = Lock()
 
         # and then queue the new task
-        try:
-            queued = False
-            starting_worker = self._cur_worker
-            while True:
-                worker_prc = self._tqm._workers[self._cur_worker]
-                if worker_prc is None or not worker_prc.is_alive():
-                    # worker process, put result into final queue
-                    worker_prc = ClassicalWorkerProcess(self._final_q, task_vars, host, task,
-                                                        play_context, self._loader, self._variable_manager,
-                                                        plugin_loader)
-                    self._tqm._workers[self._cur_worker] = worker_prc
-                    self._tqm.send_callback('v2_runner_on_start', host, task)
-                    worker_prc.start()
-                    display.debug("worker is %d (out of %d available)" % (self._cur_worker + 1, len(self._tqm._workers)))
-                self._cur_worker += 1
-                if self._cur_worker >= len(self._tqm._workers):
-                    self._cur_worker = 0
+        # TODO:
+        self._queued_task_cache[(host.name, task._uuid)] = {
+            'host': host,
+            'task': task,
+            'task_vars': task_vars,
+            'play_context': play_context
+        }
+        self._main_q.put((host, task, self._loader.get_basedir(), task_vars, play_context))
 
-                # TODO:
-                self._queued_task_cache[(host.name, task._uuid)] = {
-                    'host': host,
-                    'task': task,
-                    'task_vars': task_vars,
-                    'play_context': play_context
-                }
-                display.debug('__DEBUG self._queued_task_cache: [%s, %s] %s' % (host.name, task._uuid, self._queued_task_cache.keys()))
-                worker_prc._main_q.put((host, task, self._loader.get_basedir(), task_vars,
-                                        play_context), block=False)
-                queued = True
-
-                if queued:
-                    break
-                elif self._cur_worker == starting_worker:
-                    time.sleep(0.0001)
-
-            self._pending_results += 1
-        except (EOFError, IOError, AssertionError) as e:
-            # most likely an abort
-            display.debug("got an error while queuing: %s" % e)
-            return
+        self._pending_results += 1
         display.debug("exiting _queue_task() for %s/%s" % (host.name, task.action))
 
 
@@ -559,14 +570,13 @@ class ClassicalWorkerProcess(WorkerProcess):
     for reading later.
     '''
 
-    def __init__(self, final_q, task_vars, host, task, play_context, loader, variable_manager, shared_loader_obj):
+    def __init__(self, main_q, final_q, task_vars, host, task, play_context, loader, variable_manager, shared_loader_obj):
 
         super(WorkerProcess, self).__init__()
         # takes a task queue manager as the sole param:
 
-        # main queue owned by worker process
-        # TODO: queue close?
-        self._main_q = multiprocessing.Queue()
+        # main queue
+        self._main_q = main_q
 
         self._final_q = final_q
         self._task_vars = task_vars
@@ -596,10 +606,16 @@ class ClassicalWorkerProcess(WorkerProcess):
             try:
                 # display.debug("waiting for work")
 
-                (host, task, basedir, job_vars,
-                 play_context) = self._main_q.get(block=False)
+                last = time.time()
 
-                display.debug("there's work to be done! got a task/handler to work on: %s" % task)
+                job = self._main_q.get()
+                if job is None:
+                    break
+
+                (host, task, basedir, job_vars,
+                 play_context) = job
+
+                display.display("BEGIN: there's work to be done! got a task/handler to work on: %s" % task)
 
                 # because the task queue manager starts workers (forks) before the
                 # playbook is loaded, set the basedir of the loader inherted by
@@ -613,7 +629,8 @@ class ClassicalWorkerProcess(WorkerProcess):
                 task.set_loader(self._loader)
 
                 # execute the task and build a TaskResult from the result
-                display.debug("running TaskExecutor() for %s/%s" % (host, task))
+                display.display("running TaskExecutor() for %s/%s" % (host, task))
+                # FIXME: this is too slow
                 executor_result = TaskExecutor(
                     host,
                     task,
@@ -624,22 +641,21 @@ class ClassicalWorkerProcess(WorkerProcess):
                     self._shared_loader_obj,
                     self._final_q
                 ).run()
-                display.debug("done running TaskExecutor() for %s/%s" % (host, task))
+                display.display("done running TaskExecutor() for %s/%s" % (host, task))
                 task_result = TaskResult(host.name,
                                          task._uuid,
                                          executor_result,
                                          task_fields=task.dump_attrs())
 
                 # put the result on the result queue
-                display.debug("sending task result")
+                display.display("sending task result")
                 self._final_q.put(task_result)
-                display.debug("done sending task result")
+                display.display("done sending task result")
 
-            except queue.Empty:
-                time.sleep(0.0001)
             except AnsibleConnectionFailure:
                 try:
                     if task:
+                        # FIXME: when to send callback for unreachable?
                         task_result = TaskResult(host.name,
                                                  task._uuid,
                                                  dict(unreachable=True),
@@ -660,8 +676,9 @@ class ClassicalWorkerProcess(WorkerProcess):
                                                      task_fields=task.dump_attrs())
                             self._final_q.put(task_result, block=False)
                     except Exception:
-                        display.debug("WORKER EXCEPTION: %s" % e)
-                        display.debug("WORKER EXCEPTION: %s" % traceback.format_exc())
+                        display.display("WORKER EXCEPTION: %s" % e)
+                        display.display("WORKER EXCEPTION: %s" % traceback.format_exc())
                         break
+            display.display('END: takes %.2lf' % (time.time() - last))
 
-        display.debug("WORKER PROCESS EXITING")
+        display.display("WORKER PROCESS EXITING")

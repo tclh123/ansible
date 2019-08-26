@@ -373,6 +373,7 @@ class StrategyBase:
         Reads results off the final queue and takes appropriate action
         based on the result (executing callbacks, updating state, etc.).
         '''
+        # display.display("entering _process_pending_results")
 
         ret_results = []
 
@@ -695,6 +696,8 @@ class StrategyBase:
         between checks to ensure we don't spin lock
         '''
 
+        display.display("entering _wait_on_pending_results")
+
         ret_results = []
 
         display.debug("waiting for pending results...")
@@ -704,16 +707,7 @@ class StrategyBase:
                 raise AnsibleError("A worker was found in a dead state")
 
             # TODO:
-            try:
-                results = self._process_pending_results(iterator)
-            except Exception:
-                raise
-                # # display.debug('__DEBUG self._queued_task_cache: %s' % self._queued_task_cache)
-                # display.debug('__DEBUG self._pending_results: %s' % self._pending_results)
-                # display.debug('__DEBUG self._results: %s' % self._results)
-                # raise
-                # # TODO: close main_q
-                # self._pending_results = 0
+            results = self._process_pending_results(iterator)
 
             ret_results.extend(results)
             if self._pending_results > 0:
