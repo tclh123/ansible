@@ -108,6 +108,8 @@ def debug_closure(func):
             task = result._task
             host = result._host
             _queued_task_args = self._queued_task_cache.pop((host.name, task._uuid), None)
+            # FIXME:
+            # display.debug('__DEBUG _queued_task_args: %s' % _queued_task_args)
             task_vars = _queued_task_args['task_vars']
             play_context = _queued_task_args['play_context']
             # Try to grab the previous host state, if it doesn't exist use get_host_state to generate an empty state
@@ -323,6 +325,9 @@ class StrategyBase:
                         'task_vars': task_vars,
                         'play_context': play_context
                     }
+                    # FIXME:
+                    # with open('/tmp/lihan-ansible-test', 'w') as f:
+                    #     f.write('__DEBUG self._queued_task_cache: %s' % self._queued_task_cache.items())
 
                     worker_prc = WorkerProcess(self._final_q, task_vars, host, task, play_context, self._loader, self._variable_manager, plugin_loader)
                     self._workers[self._cur_worker] = worker_prc
@@ -417,10 +422,16 @@ class StrategyBase:
             finally:
                 self._results_lock.release()
 
+            display.debug('__DEBUG get task_result: %s' % task_result)
+
             # get the original host and task. We then assign them to the TaskResult for use in callbacks/etc.
             original_host = get_original_host(task_result._host)
             queue_cache_entry = (original_host.name, task_result._task)
+            display.debug('__DEBUG 2 self._queued_task_cache: [%s] %s' % (queue_cache_entry, self._queued_task_cache.keys()))
             found_task = self._queued_task_cache.get(queue_cache_entry)['task']
+            # display.debug('__DEBUG self._queued_task_cache: %s, queue_cache_entry: %s' % (self._queued_task_cache, queue_cache_entry))
+            # display.debug('__DEBUG found_task=%s' % found_task)
+            # display.debug('__DEBUG found_task=%s' % self._queued_task_cache.get(queue_cache_entry)['play_context'])
             original_task = found_task.copy(exclude_parent=True, exclude_tasks=True)
             original_task._parent = found_task._parent
             original_task.from_attrs(task_result._task_fields)
@@ -677,6 +688,7 @@ class StrategyBase:
 
         return ret_results
 
+    # FIXME: why raise?
     def _wait_on_pending_results(self, iterator):
         '''
         Wait for the shared counter to drop to zero, using a short sleep
@@ -691,13 +703,25 @@ class StrategyBase:
             if self._tqm.has_dead_workers():
                 raise AnsibleError("A worker was found in a dead state")
 
-            results = self._process_pending_results(iterator)
+            # TODO:
+            try:
+                results = self._process_pending_results(iterator)
+            except Exception:
+                raise
+                # # display.debug('__DEBUG self._queued_task_cache: %s' % self._queued_task_cache)
+                # display.debug('__DEBUG self._pending_results: %s' % self._pending_results)
+                # display.debug('__DEBUG self._results: %s' % self._results)
+                # raise
+                # # TODO: close main_q
+                # self._pending_results = 0
+
             ret_results.extend(results)
             if self._pending_results > 0:
                 time.sleep(C.DEFAULT_INTERNAL_POLL_INTERVAL)
 
         display.debug("no more pending results, returning what we have")
 
+        display.debug('__DEBUG ret_results: %s' % ret_results)
         return ret_results
 
     def _add_host(self, host_info, iterator):

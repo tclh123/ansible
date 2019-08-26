@@ -247,16 +247,19 @@ class TaskQueueManager:
         return play_return
 
     def cleanup(self):
+        # FIXME:
         display.debug("RUNNING CLEANUP")
         self.terminate()
         self._final_q.close()
         self._cleanup_processes()
 
     def _cleanup_processes(self):
+        display.debug("__DEBUG tqm._cleanup_processes")
         if hasattr(self, '_workers'):
             for worker_prc in self._workers:
                 if worker_prc and worker_prc.is_alive():
                     try:
+                        display.debug("__DEBUG stopping %s" % worker_prc)
                         worker_prc.terminate()
                     except AttributeError:
                         pass
@@ -274,7 +277,9 @@ class TaskQueueManager:
         return self._loader
 
     def get_workers(self):
+        # FIXME: why copy?
         return self._workers[:]
+        # return self._workers
 
     def terminate(self):
         self._terminated = True
